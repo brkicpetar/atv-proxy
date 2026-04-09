@@ -68,19 +68,23 @@ async function getM1Stream() {
   const tokenUrl = "https://player.mediaklikk.hu/playernew/player.php?video=mtv1live&noflash=yes&autostart=true";
   const { body } = await fetch(tokenUrl);
 
-  // Try to extract token/streamId from the page
-  // Mediaklikk embeds a JSON config or direct m3u8 in various formats
+  // The URL is embedded as JSON with escaped slashes: "file":"https:\/\/..."
+  // Match both escaped and unescaped versions, then unescape
   const patterns = [
-    /["']file["']\s*:\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)/i,
-    /src['"]\s*:\s*['"](https?:\/\/[^'"]+\.m3u8[^'"]*)/i,
-    /"(https?:\/\/[^"]+\.m3u8[^"]*)"/,
-    /'(https?:\/\/[^']+\.m3u8[^']*)'/,
-    /https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/,
+    /"file"\s*:\s*"(https?:\\\/\\\/[^"]+\.m3u8[^"]*)"/i,
+    /"file"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/i,
+    /"file"\s*:\s*"(https?:[^"]+\.m3u8[^"]*)"/i,
+    /(https?:\\\/\\\/[^\s"']+\.m3u8[^\s"']*)/i,
+    /(https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*)/i,
   ];
 
   for (const pattern of patterns) {
     const match = body.match(pattern);
-    if (match) return match[1] || match[0];
+    if (match) {
+      const url = (match[1] || match[0]).replace(/\\\//g, "/");
+      console.log("Extracted M1 URL:", url);
+      return url;
+    }
   }
 
   // Step 2: try the MTVA token API directly
