@@ -53,15 +53,30 @@ function proxyStream(targetUrl, res) {
 
 function rewriteM3u8(content, baseUrl, proxyBase) {
   const base = new URL(baseUrl);
+
+  const makeAbsolute = (url) => {
+    try { return new URL(url).href; }
+    catch { return new URL(url, base).href; }
+  };
+
   return content.split("\n").map((line) => {
     const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) return line;
-    let absolute;
-    try { absolute = new URL(trimmed).href; }
-    catch { absolute = new URL(trimmed, base).href; }
+    if (!trimmed) return line;
+
+    // Rewrite URI="..." attributes inside tag lines (e.g. #EXT-X-MEDIA, #EXT-X-KEY)
+    if (trimmed.startsWith("#")) {
+      return line.replace(/URI="([^"]+)"/g, (match, uri) => {
+        const absolute = makeAbsolute(uri);
+        return `URI="${proxyBase}/segment?url=${encodeURIComponent(absolute)}"`;
+      });
+    }
+
+    // Rewrite plain URL lines (variant playlists, segments)
+    const absolute = makeAbsolute(trimmed);
     return `${proxyBase}/segment?url=${encodeURIComponent(absolute)}`;
   }).join("\n");
 }
+
 
 async function getM1Stream() {
   // Step 1: get the token from Mediaklikk's token API
