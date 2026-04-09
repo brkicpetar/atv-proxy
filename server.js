@@ -125,41 +125,80 @@ async function getRtlStream() {
     "Origin": "https://livestreamlinks.net"
   });
 
-  const m3u8Patterns = [
-    /(https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*)/gi,
-    /"file"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/gi,
-    /"url"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/gi,
-    /"source"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/gi,
-    /"hls"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/gi,
-    /<source[^>]+src=["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/gi,
-    /data-hls-source=["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/gi,
-  ];
-
-  let foundUrl = null;
-  for (const pattern of m3u8Patterns) {
-    const matches = html.matchAll(pattern);
-    for (const match of matches) {
-      const candidate = match[1];
-      if (candidate && !candidate.includes("ad") && !candidate.includes("placeholder")) {
-        foundUrl = candidate;
-        break;
+  // 1. Direct m3u8 in HTML (including script content)
+  const allContent = html;
+  const m3u8Matches = allContent.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/gi);
+  if (m3u8Matches && m3u8Matches.length) {
+    for (const url of m3u8Matches) {
+      if (!url.includes("ad") && !url.includes("placeholder")) {
+        console.log("Found m3u8 directly:", url);
+        return url;
       }
     }
-    if (foundUrl) break;
   }
 
-  if (!foundUrl) {
-    const anyM3u8 = html.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
-    if (anyM3u8) foundUrl = anyM3u8[0];
+  // 2. Extract API endpoints from scripts
+  const apiPatterns = [
+    /(https?:\/\/[^\s"'<>]+(?:api|stream|getstream|player|config)[^\s"'<>]*)/gi,
+    /["'](https?:\/\/[^"']+\.json[^"']*)["']/gi,
+    /fetch\(["']([^"']+)["']/gi,
+    /XMLHttpRequest.*\.open\([^,]+,\s*["']([^"']+)["']/gi,
+  ];
+  let apiUrls = [];
+  for (const pattern of apiPatterns) {
+    const matches = allContent.matchAll(pattern);
+    for (const match of matches) {
+      let apiUrl = match[1];
+      if (apiUrl && !apiUrl.includes("ad") && !apiUrl.includes(".css") && !apiUrl.includes(".js")) {
+        apiUrls.push(apiUrl);
+      }
+    }
+  }
+  apiUrls = [...new Set(apiUrls)];
+  console.log("Found potential API URLs:", apiUrls);
+
+  // 3. Try each API to see if it returns an m3u8
+  for (const apiUrl of apiUrls) {
+    try {
+      console.log("Trying API:", apiUrl);
+      const { body, headers } = await fetch(apiUrl, {
+        "Referer": pageUrl,
+        "Origin": "https://livestreamlinks.net"
+      });
+      const contentType = headers["content-type"] || "";
+      if (contentType.includes("json") || body.trim().startsWith("{") || body.trim().startsWith("[")) {
+        let json;
+        try { json = JSON.parse(body); } catch(e) { continue; }
+        const jsonStr = JSON.stringify(json);
+        const m3u8InJson = jsonStr.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
+        if (m3u8InJson) {
+          console.log("Found m3u8 from API:", m3u8InJson[0]);
+          return m3u8InJson[0];
+        }
+      } else if (body.includes(".m3u8")) {
+        const m3u8Match = body.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
+        if (m3u8Match) {
+          console.log("Found m3u8 from API response:", m3u8Match[0]);
+          return m3u8Match[0];
+        }
+      }
+    } catch (e) {
+      console.log(`API ${apiUrl} failed:`, e.message);
+    }
   }
 
-  if (!foundUrl) {
-    throw new Error("Could not find any m3u8 stream URL in the RTL page");
+  // 4. Look inside script tags for player config (source, hls, file)
+  const scriptTags = html.match(/<script[^>]*>([\s\S]*?)<\/script>/gi) || [];
+  for (const script of scriptTags) {
+    const sourceMatches = script.match(/source\s*:\s*["']([^"']+\.m3u8[^"']*)["']/i);
+    if (sourceMatches) return sourceMatches[1];
+    const hlsMatches = script.match(/hls\s*:\s*["']([^"']+\.m3u8[^"']*)["']/i);
+    if (hlsMatches) return hlsMatches[1];
+    const fileMatches = script.match(/file\s*:\s*["']([^"']+\.m3u8[^"']*)["']/i);
+    if (fileMatches) return fileMatches[1];
   }
 
-  const absoluteUrl = foundUrl.startsWith("http") ? foundUrl : new URL(foundUrl, pageUrl).href;
-  console.log("Extracted RTL stream URL:", absoluteUrl);
-  return absoluteUrl;
+  throw new Error("Could not find any m3u8 stream URL in the RTL page");
 }
 
 const server = http.createServer(async (req, res) => {
