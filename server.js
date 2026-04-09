@@ -63,7 +63,6 @@ function rewriteM3u8(content, baseUrl, proxyBase) {
     const trimmed = line.trim();
     if (!trimmed) return line;
 
-    // Rewrite URI="..." attributes inside tag lines (e.g. #EXT-X-MEDIA, #EXT-X-KEY)
     if (trimmed.startsWith("#")) {
       return line.replace(/URI="([^"]+)"/g, (match, uri) => {
         const absolute = makeAbsolute(uri);
@@ -71,20 +70,15 @@ function rewriteM3u8(content, baseUrl, proxyBase) {
       });
     }
 
-    // Rewrite plain URL lines (variant playlists, segments)
     const absolute = makeAbsolute(trimmed);
     return `${proxyBase}/segment?url=${encodeURIComponent(absolute)}`;
   }).join("\n");
 }
 
-
 async function getM1Stream() {
-  // Step 1: get the token from Mediaklikk's token API
   const tokenUrl = "https://player.mediaklikk.hu/playernew/player.php?video=mtv1live&noflash=yes&autostart=true";
   const { body } = await fetch(tokenUrl);
 
-  // The URL is embedded as JSON with escaped slashes: "file":"https:\/\/..."
-  // Match both escaped and unescaped versions, then unescape
   const patterns = [
     /"file"\s*:\s*"(https?:\\\/\\\/[^"]+\.m3u8[^"]*)"/i,
     /"file"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/i,
@@ -102,7 +96,6 @@ async function getM1Stream() {
     }
   }
 
-  // Step 2: try the MTVA token API directly
   const tokenApiUrl = "https://player.mediaklikk.hu/player/api/token?channel=m1";
   const tokenResp = await fetch(tokenApiUrl);
   try {
@@ -112,7 +105,6 @@ async function getM1Stream() {
     if (json.file) return json.file;
   } catch {}
 
-  // Step 3: try known MTVA stream API pattern
   const mtvaApiUrl = "https://player.mediaklikk.hu/playernew/player.php?noflash=yes&video=mtv1live";
   const mtvaResp = await fetch(mtvaApiUrl, { "Accept": "application/json" });
   try {
@@ -133,15 +125,14 @@ async function getRtlStream() {
     "Origin": "https://livestreamlinks.net"
   });
 
-  // Patterns to find .m3u8 URLs in the HTML
   const m3u8Patterns = [
     /(https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*)/gi,
-    /"file"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/i,
-    /"url"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/i,
-    /"source"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/i,
-    /"hls"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/i,
-    /<source[^>]+src=["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/i,
-    /data-hls-source=["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/i,
+    /"file"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/gi,
+    /"url"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/gi,
+    /"source"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/gi,
+    /"hls"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/gi,
+    /<source[^>]+src=["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/gi,
+    /data-hls-source=["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/gi,
   ];
 
   let foundUrl = null;
@@ -149,7 +140,6 @@ async function getRtlStream() {
     const matches = html.matchAll(pattern);
     for (const match of matches) {
       const candidate = match[1];
-      // Filter out obvious non‑stream URLs (e.g. ads, placeholders)
       if (candidate && !candidate.includes("ad") && !candidate.includes("placeholder")) {
         foundUrl = candidate;
         break;
@@ -159,7 +149,6 @@ async function getRtlStream() {
   }
 
   if (!foundUrl) {
-    // Last resort: any .m3u8 in the page (take the first one)
     const anyM3u8 = html.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
     if (anyM3u8) foundUrl = anyM3u8[0];
   }
@@ -168,7 +157,6 @@ async function getRtlStream() {
     throw new Error("Could not find any m3u8 stream URL in the RTL page");
   }
 
-  // Resolve relative URLs (rare, but safe)
   const absoluteUrl = foundUrl.startsWith("http") ? foundUrl : new URL(foundUrl, pageUrl).href;
   console.log("Extracted RTL stream URL:", absoluteUrl);
   return absoluteUrl;
@@ -191,18 +179,15 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // /m1 — resolve M1 stream and return proxied m3u8
   if (path === "/m1") {
     try {
       const m3u8Url = await getM1Stream();
       console.log("Resolved M1 stream:", m3u8Url);
-
       const { body: m3u8Content, headers: m3u8Headers } = await fetch(m3u8Url);
       const proto = req.headers["x-forwarded-proto"] || "https";
       const host = req.headers.host;
       const proxyBase = `${proto}://${host}`;
       const rewritten = rewriteM3u8(m3u8Content, m3u8Url, proxyBase);
-
       res.writeHead(200, {
         ...CORS_HEADERS,
         "Content-Type": m3u8Headers["content-type"] || "application/vnd.apple.mpegurl",
@@ -217,7 +202,6 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // /m1debug — return raw player page for debugging
   if (path === "/m1debug") {
     try {
       const { body } = await fetch("https://player.mediaklikk.hu/playernew/player.php?video=mtv1live&noflash=yes&autostart=true");
@@ -230,23 +214,18 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // /rtl — extract RTL stream and return proxied m3u8
   if (path === "/rtl") {
     try {
       const m3u8Url = await getRtlStream();
       console.log("Resolved RTL stream:", m3u8Url);
-
-      // Fetch the master/variant playlist with RTL‑specific headers
       const { body: m3u8Content, headers: m3u8Headers } = await fetch(m3u8Url, {
         "Referer": "https://livestreamlinks.net/",
         "Origin": "https://livestreamlinks.net"
       });
-
       const proto = req.headers["x-forwarded-proto"] || "https";
       const host = req.headers.host;
       const proxyBase = `${proto}://${host}`;
       const rewritten = rewriteM3u8(m3u8Content, m3u8Url, proxyBase);
-
       res.writeHead(200, {
         ...CORS_HEADERS,
         "Content-Type": m3u8Headers["content-type"] || "application/vnd.apple.mpegurl",
@@ -261,7 +240,6 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // /rtldebug — return raw HTML of the RTL page for debugging
   if (path === "/rtldebug") {
     try {
       const { body } = await fetch("https://livestreamlinks.net/onlinetv/hungary/rtl", {
@@ -277,7 +255,6 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // /proxy?url= — proxy any m3u8
   if (path === "/proxy") {
     const targetUrl = query.url;
     if (!targetUrl) { res.writeHead(400, CORS_HEADERS); res.end("Missing url"); return; }
@@ -295,7 +272,6 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // /segment?url= — proxy segment or nested m3u8
   if (path === "/segment") {
     const targetUrl = query.url;
     if (!targetUrl) { res.writeHead(400, CORS_HEADERS); res.end("Missing url"); return; }
@@ -316,7 +292,6 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // /stream — ATV raw MPEG-TS
   if (path === "/stream") {
     proxyStream(`http://5.15.3.247:9988/stream/channel/234c63837f38efb4fbefc383a4b8c453`, res);
     return;
