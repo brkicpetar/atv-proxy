@@ -1,8 +1,6 @@
 const http = require("http");
-
-const TARGET_HOST = "5.15.3.247";
-const TARGET_PORT = 9988;
-const TARGET_PATH = "/stream/channel/79a8c00f96580b33b6599b9651cf89eb";
+const https = require("https");
+const url = require("url");
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -10,68 +8,149 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Headers": "*",
 };
 
-const server = http.createServer((req, res) => {
+// Fetch a URL and return body as string
+function fetchText(targetUrl) {
+  return new Promise((resolve, reject) => {
+    const client = targetUrl.startsWith("https") ? https : http;
+    client.get(targetUrl, { headers: { "User-Agent": "Mozilla/5.0" } }, (res) => {
+      let data = "";
+      res.on("data", (chunk) => data += chunk);
+      res.on("end", () => resolve({ body: data, headers: res.headers, status: res.statusCode }));
+    }).on("error", reject);
+  });
+}
+
+// Proxy a URL, piping response straight to res
+function proxyUrl(targetUrl, res, extraHeaders = {}) {
+  const client = targetUrl.startsWith("https") ? https : http;
+  const req = client.get(targetUrl, {
+    headers: { "User-Agent": "Mozilla/5.0", ...extraHeaders }
+  }, (proxyRes) => {
+    const headers = {};
+    for (const [k, v] of Object.entries(proxyRes.headers)) {
+      if (!k.toLowerCase().startsWith("access-control")) headers[k] = v;
+    }
+    Object.assign(headers, CORS_HEADERS);
+    res.writeHead(proxyRes.statusCode, headers);
+    proxyRes.pipe(res);
+  });
+  req.on("error", (e) => {
+    res.writeHead(502, CORS_HEADERS);
+    res.end("Proxy error: " + e.message);
+  });
+}
+
+// Rewrite m3u8 content so all URLs point back through this proxy
+function rewriteM3u8(content, baseUrl, proxyBase) {
+  const base = new URL(baseUrl);
+  return content.split("\n").map((line) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) return line;
+    // It's a URL line — make absolute if relative, then wrap in proxy
+    let absolute;
+    try {
+      absolute = new URL(trimmed).href; // already absolute
+    } catch {
+      absolute = new URL(trimmed, base).href; // relative → absolute
+    }
+    return `${proxyBase}/segment?url=${encodeURIComponent(absolute)}`;
+  }).join("\n");
+}
+
+const server = http.createServer(async (req, res) => {
   if (req.method === "OPTIONS") {
     res.writeHead(204, CORS_HEADERS);
     res.end();
     return;
   }
 
-  if (req.url === "/health") {
+  const parsed = url.parse(req.url, true);
+  const path = parsed.pathname;
+  const query = parsed.query;
+
+  // Health check
+  if (path === "/health") {
     res.writeHead(200, CORS_HEADERS);
     res.end("ok");
     return;
   }
 
-  if (req.url === "/stream.m3u8" || req.url === "/live.m3u8") {
-    const host = req.headers.host;
-    const streamUrl = `https://${host}/stream`;
-    const m3u8 = [
-      "#EXTM3U",
-      "#EXT-X-VERSION:3",
-      "#EXT-X-TARGETDURATION:0",
-      "#EXT-X-MEDIA-SEQUENCE:0",
-      "#EXT-X-PLAYLIST-TYPE:EVENT",
-      "#EXTINF:0,",
-      streamUrl,
-    ].join("\n");
-    res.writeHead(200, { ...CORS_HEADERS, "Content-Type": "application/vnd.apple.mpegurl" });
-    res.end(m3u8);
+  // /proxy?url=<encoded-m3u8-url>
+  // Fetches the m3u8, rewrites all segment URLs to go through /segment
+  if (path === "/proxy") {
+    const targetUrl = query.url;
+    if (!targetUrl) {
+      res.writeHead(400, CORS_HEADERS);
+      res.end("Missing url param");
+      return;
+    }
+
+    try {
+      const { body, headers } = await fetchText(targetUrl);
+      const proto = req.headers["x-forwarded-proto"] || "https";
+      const host = req.headers.host;
+      const proxyBase = `${proto}://${host}`;
+      const rewritten = rewriteM3u8(body, targetUrl, proxyBase);
+
+      res.writeHead(200, {
+        ...CORS_HEADERS,
+        "Content-Type": headers["content-type"] || "application/vnd.apple.mpegurl",
+        "Cache-Control": "no-cache",
+      });
+      res.end(rewritten);
+    } catch (e) {
+      res.writeHead(502, CORS_HEADERS);
+      res.end("Failed to fetch m3u8: " + e.message);
+    }
     return;
   }
 
-  // Pass query params (e.g. ?profile=xxx) through to TVHeadend
-  const query = req.url.includes("?") ? req.url.substring(req.url.indexOf("?")) : "";
-  const targetPath = TARGET_PATH + query;
-
-  const options = {
-    hostname: TARGET_HOST,
-    port: TARGET_PORT,
-    path: targetPath,
-    method: "GET",
-    headers: {
-      host: `${TARGET_HOST}:${TARGET_PORT}`,
-      "user-agent": "Mozilla/5.0",
-    },
-  };
-
-  const proxy = http.request(options, (proxyRes) => {
-    const headers = {};
-    for (const [key, val] of Object.entries(proxyRes.headers)) {
-      if (!key.toLowerCase().startsWith("access-control")) headers[key] = val;
+  // /segment?url=<encoded-segment-url>
+  // Proxies a .ts segment or nested m3u8 through this server
+  if (path === "/segment") {
+    const targetUrl = query.url;
+    if (!targetUrl) {
+      res.writeHead(400, CORS_HEADERS);
+      res.end("Missing url param");
+      return;
     }
-    Object.assign(headers, CORS_HEADERS);
-    res.writeHead(proxyRes.statusCode, headers);
-    proxyRes.pipe(res);
-  });
 
-  proxy.on("error", (err) => {
-    res.writeHead(502, CORS_HEADERS);
-    res.end("Proxy error: " + err.message);
-  });
+    // If it's a nested m3u8 (e.g. quality variant), rewrite it too
+    if (targetUrl.includes(".m3u8") || targetUrl.includes("m3u8")) {
+      try {
+        const { body, headers } = await fetchText(targetUrl);
+        const proto = req.headers["x-forwarded-proto"] || "https";
+        const host = req.headers.host;
+        const proxyBase = `${proto}://${host}`;
+        const rewritten = rewriteM3u8(body, targetUrl, proxyBase);
+        res.writeHead(200, {
+          ...CORS_HEADERS,
+          "Content-Type": headers["content-type"] || "application/vnd.apple.mpegurl",
+          "Cache-Control": "no-cache",
+        });
+        res.end(rewritten);
+      } catch (e) {
+        res.writeHead(502, CORS_HEADERS);
+        res.end("Failed: " + e.message);
+      }
+      return;
+    }
 
-  req.pipe(proxy);
+    // Otherwise proxy the segment directly
+    proxyUrl(targetUrl, res);
+    return;
+  }
+
+  // ATV raw MPEG-TS stream (kept for backwards compat)
+  if (path === "/stream") {
+    const atvUrl = `http://5.15.3.247:9988/stream/channel/234c63837f38efb4fbefc383a4b8c453${query.profile ? "?profile=" + query.profile : ""}`;
+    proxyUrl(atvUrl, res);
+    return;
+  }
+
+  res.writeHead(404, CORS_HEADERS);
+  res.end("Not found");
 });
 
 const PORT = process.env.PORT || 10000;
-server.listen(PORT, () => console.log(`ATV proxy on port ${PORT}`));
+server.listen(PORT, () => console.log(`Proxy server on port ${PORT}`));
