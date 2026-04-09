@@ -125,6 +125,55 @@ async function getM1Stream() {
   throw new Error("Could not extract M1 stream URL. Body preview: " + body.slice(0, 500));
 }
 
+async function getRtlStream() {
+  const pageUrl = "https://livestreamlinks.net/onlinetv/hungary/rtl";
+  console.log("Fetching RTL page:", pageUrl);
+  const { body: html } = await fetch(pageUrl, {
+    "Referer": "https://livestreamlinks.net/",
+    "Origin": "https://livestreamlinks.net"
+  });
+
+  // Patterns to find .m3u8 URLs in the HTML
+  const m3u8Patterns = [
+    /(https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*)/gi,
+    /"file"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/i,
+    /"url"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/i,
+    /"source"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/i,
+    /"hls"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/i,
+    /<source[^>]+src=["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/i,
+    /data-hls-source=["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/i,
+  ];
+
+  let foundUrl = null;
+  for (const pattern of m3u8Patterns) {
+    const matches = html.matchAll(pattern);
+    for (const match of matches) {
+      const candidate = match[1];
+      // Filter out obvious non‑stream URLs (e.g. ads, placeholders)
+      if (candidate && !candidate.includes("ad") && !candidate.includes("placeholder")) {
+        foundUrl = candidate;
+        break;
+      }
+    }
+    if (foundUrl) break;
+  }
+
+  if (!foundUrl) {
+    // Last resort: any .m3u8 in the page (take the first one)
+    const anyM3u8 = html.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
+    if (anyM3u8) foundUrl = anyM3u8[0];
+  }
+
+  if (!foundUrl) {
+    throw new Error("Could not find any m3u8 stream URL in the RTL page");
+  }
+
+  // Resolve relative URLs (rare, but safe)
+  const absoluteUrl = foundUrl.startsWith("http") ? foundUrl : new URL(foundUrl, pageUrl).href;
+  console.log("Extracted RTL stream URL:", absoluteUrl);
+  return absoluteUrl;
+}
+
 const server = http.createServer(async (req, res) => {
   if (req.method === "OPTIONS") {
     res.writeHead(204, CORS_HEADERS);
@@ -172,6 +221,53 @@ const server = http.createServer(async (req, res) => {
   if (path === "/m1debug") {
     try {
       const { body } = await fetch("https://player.mediaklikk.hu/playernew/player.php?video=mtv1live&noflash=yes&autostart=true");
+      res.writeHead(200, { ...CORS_HEADERS, "Content-Type": "text/plain" });
+      res.end(body);
+    } catch (e) {
+      res.writeHead(502, CORS_HEADERS);
+      res.end(e.message);
+    }
+    return;
+  }
+
+  // /rtl — extract RTL stream and return proxied m3u8
+  if (path === "/rtl") {
+    try {
+      const m3u8Url = await getRtlStream();
+      console.log("Resolved RTL stream:", m3u8Url);
+
+      // Fetch the master/variant playlist with RTL‑specific headers
+      const { body: m3u8Content, headers: m3u8Headers } = await fetch(m3u8Url, {
+        "Referer": "https://livestreamlinks.net/",
+        "Origin": "https://livestreamlinks.net"
+      });
+
+      const proto = req.headers["x-forwarded-proto"] || "https";
+      const host = req.headers.host;
+      const proxyBase = `${proto}://${host}`;
+      const rewritten = rewriteM3u8(m3u8Content, m3u8Url, proxyBase);
+
+      res.writeHead(200, {
+        ...CORS_HEADERS,
+        "Content-Type": m3u8Headers["content-type"] || "application/vnd.apple.mpegurl",
+        "Cache-Control": "no-cache",
+      });
+      res.end(rewritten);
+    } catch (e) {
+      console.error("RTL error:", e.message);
+      res.writeHead(502, CORS_HEADERS);
+      res.end("RTL error: " + e.message);
+    }
+    return;
+  }
+
+  // /rtldebug — return raw HTML of the RTL page for debugging
+  if (path === "/rtldebug") {
+    try {
+      const { body } = await fetch("https://livestreamlinks.net/onlinetv/hungary/rtl", {
+        "Referer": "https://livestreamlinks.net/",
+        "Origin": "https://livestreamlinks.net"
+      });
       res.writeHead(200, { ...CORS_HEADERS, "Content-Type": "text/plain" });
       res.end(body);
     } catch (e) {
