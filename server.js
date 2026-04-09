@@ -17,19 +17,15 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // Health check
   if (req.url === "/health") {
     res.writeHead(200, CORS_HEADERS);
     res.end("ok");
     return;
   }
 
-  // Serve a fake M3U8 that points back to /stream for the actual MPEG-TS
-  // This tricks some players into treating it as a single-segment HLS stream
   if (req.url === "/stream.m3u8" || req.url === "/live.m3u8") {
     const host = req.headers.host;
-    const proto = "https";
-    const streamUrl = `${proto}://${host}/stream`;
+    const streamUrl = `https://${host}/stream`;
     const m3u8 = [
       "#EXTM3U",
       "#EXT-X-VERSION:3",
@@ -39,19 +35,19 @@ const server = http.createServer((req, res) => {
       "#EXTINF:0,",
       streamUrl,
     ].join("\n");
-    res.writeHead(200, {
-      ...CORS_HEADERS,
-      "Content-Type": "application/vnd.apple.mpegurl",
-    });
+    res.writeHead(200, { ...CORS_HEADERS, "Content-Type": "application/vnd.apple.mpegurl" });
     res.end(m3u8);
     return;
   }
 
-  // Proxy the raw MPEG-TS stream
+  // Pass query params (e.g. ?profile=xxx) through to TVHeadend
+  const query = req.url.includes("?") ? req.url.substring(req.url.indexOf("?")) : "";
+  const targetPath = TARGET_PATH + query;
+
   const options = {
     hostname: TARGET_HOST,
     port: TARGET_PORT,
-    path: TARGET_PATH,
+    path: targetPath,
     method: "GET",
     headers: {
       host: `${TARGET_HOST}:${TARGET_PORT}`,
@@ -62,9 +58,7 @@ const server = http.createServer((req, res) => {
   const proxy = http.request(options, (proxyRes) => {
     const headers = {};
     for (const [key, val] of Object.entries(proxyRes.headers)) {
-      if (!key.toLowerCase().startsWith("access-control")) {
-        headers[key] = val;
-      }
+      if (!key.toLowerCase().startsWith("access-control")) headers[key] = val;
     }
     Object.assign(headers, CORS_HEADERS);
     res.writeHead(proxyRes.statusCode, headers);
