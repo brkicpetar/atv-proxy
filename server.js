@@ -8,29 +8,35 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Headers": "*",
 };
 
-const JWPLAYER_PAGE = "https://player.mediaklikk.hu/playernew/player.php?video=mtv1live&noflash=yes&autostart=true&mute=false";
-
-function fetchText(targetUrl, extraHeaders = {}) {
+function fetch(targetUrl, extraHeaders = {}) {
   return new Promise((resolve, reject) => {
     const client = targetUrl.startsWith("https") ? https : http;
-    client.get(targetUrl, {
-      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", ...extraHeaders }
-    }, (res) => {
-      // follow redirects
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        return fetchText(res.headers.location, extraHeaders).then(resolve).catch(reject);
+    const opts = {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120",
+        "Referer": "https://mediaklikk.hu/",
+        "Origin": "https://mediaklikk.hu",
+        ...extraHeaders,
       }
-      let data = "";
-      res.on("data", (chunk) => data += chunk);
-      res.on("end", () => resolve({ body: data, headers: res.headers, status: res.statusCode }));
+    };
+    client.get(targetUrl, opts, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        return fetch(res.headers.location, extraHeaders).then(resolve).catch(reject);
+      }
+      let data = Buffer.alloc(0);
+      res.on("data", (chunk) => data = Buffer.concat([data, chunk]));
+      res.on("end", () => resolve({ body: data.toString(), headers: res.headers, status: res.statusCode }));
     }).on("error", reject);
   });
 }
 
-function proxyUrl(targetUrl, res) {
+function proxyStream(targetUrl, res) {
   const client = targetUrl.startsWith("https") ? https : http;
   client.get(targetUrl, {
-    headers: { "User-Agent": "Mozilla/5.0" }
+    headers: {
+      "User-Agent": "Mozilla/5.0",
+      "Referer": "https://mediaklikk.hu/",
+    }
   }, (proxyRes) => {
     const headers = {};
     for (const [k, v] of Object.entries(proxyRes.headers)) {
@@ -51,27 +57,53 @@ function rewriteM3u8(content, baseUrl, proxyBase) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) return line;
     let absolute;
-    try {
-      absolute = new URL(trimmed).href;
-    } catch {
-      absolute = new URL(trimmed, base).href;
-    }
+    try { absolute = new URL(trimmed).href; }
+    catch { absolute = new URL(trimmed, base).href; }
     return `${proxyBase}/segment?url=${encodeURIComponent(absolute)}`;
   }).join("\n");
 }
 
-// Extract first m3u8 URL from JWPlayer page HTML
-function extractM3u8(html) {
+async function getM1Stream() {
+  // Step 1: get the token from Mediaklikk's token API
+  const tokenUrl = "https://player.mediaklikk.hu/playernew/player.php?video=mtv1live&noflash=yes&autostart=true";
+  const { body } = await fetch(tokenUrl);
+
+  // Try to extract token/streamId from the page
+  // Mediaklikk embeds a JSON config or direct m3u8 in various formats
   const patterns = [
-    /["']?(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)["']?/i,
-    /file:\s*["'](https?:\/\/[^"']+)["']/i,
-    /source[^}]*?["'](https?:\/\/[^"']+m3u8[^"']*)["']/i,
+    /["']file["']\s*:\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)/i,
+    /src['"]\s*:\s*['"](https?:\/\/[^'"]+\.m3u8[^'"]*)/i,
+    /"(https?:\/\/[^"]+\.m3u8[^"]*)"/,
+    /'(https?:\/\/[^']+\.m3u8[^']*)'/,
+    /https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/,
   ];
+
   for (const pattern of patterns) {
-    const match = html.match(pattern);
-    if (match) return match[1];
+    const match = body.match(pattern);
+    if (match) return match[1] || match[0];
   }
-  return null;
+
+  // Step 2: try the MTVA token API directly
+  const tokenApiUrl = "https://player.mediaklikk.hu/player/api/token?channel=m1";
+  const tokenResp = await fetch(tokenApiUrl);
+  try {
+    const json = JSON.parse(tokenResp.body);
+    if (json.url) return json.url;
+    if (json.stream) return json.stream;
+    if (json.file) return json.file;
+  } catch {}
+
+  // Step 3: try known MTVA stream API pattern
+  const mtvaApiUrl = "https://player.mediaklikk.hu/playernew/player.php?noflash=yes&video=mtv1live";
+  const mtvaResp = await fetch(mtvaApiUrl, { "Accept": "application/json" });
+  try {
+    const json = JSON.parse(mtvaResp.body);
+    const str = JSON.stringify(json);
+    const m = str.match(/https?:\/\/[^"']+\.m3u8[^"']*/);
+    if (m) return m[0];
+  } catch {}
+
+  throw new Error("Could not extract M1 stream URL. Body preview: " + body.slice(0, 500));
 }
 
 const server = http.createServer(async (req, res) => {
@@ -91,24 +123,16 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // /m1 — fetch JWPlayer page, extract m3u8, return proxied m3u8
+  // /m1 — resolve M1 stream and return proxied m3u8
   if (path === "/m1") {
     try {
-      const { body } = await fetchText(JWPLAYER_PAGE);
-      const m3u8Url = extractM3u8(body);
-      if (!m3u8Url) {
-        res.writeHead(502, CORS_HEADERS);
-        res.end("Could not find m3u8 URL in player page");
-        return;
-      }
+      const m3u8Url = await getM1Stream();
+      console.log("Resolved M1 stream:", m3u8Url);
 
-      // Fetch the m3u8 from Render's IP (token is now bound to Render's IP)
-      const { body: m3u8Content, headers: m3u8Headers } = await fetchText(m3u8Url);
-
+      const { body: m3u8Content, headers: m3u8Headers } = await fetch(m3u8Url);
       const proto = req.headers["x-forwarded-proto"] || "https";
       const host = req.headers.host;
       const proxyBase = `${proto}://${host}`;
-
       const rewritten = rewriteM3u8(m3u8Content, m3u8Url, proxyBase);
 
       res.writeHead(200, {
@@ -118,27 +142,36 @@ const server = http.createServer(async (req, res) => {
       });
       res.end(rewritten);
     } catch (e) {
+      console.error("M1 error:", e.message);
       res.writeHead(502, CORS_HEADERS);
-      res.end("M1 fetch failed: " + e.message);
+      res.end("M1 error: " + e.message);
     }
     return;
   }
 
-  // /proxy?url=<encoded-m3u8> — proxy any m3u8 with rewritten segments
+  // /m1debug — return raw player page for debugging
+  if (path === "/m1debug") {
+    try {
+      const { body } = await fetch("https://player.mediaklikk.hu/playernew/player.php?video=mtv1live&noflash=yes&autostart=true");
+      res.writeHead(200, { ...CORS_HEADERS, "Content-Type": "text/plain" });
+      res.end(body);
+    } catch (e) {
+      res.writeHead(502, CORS_HEADERS);
+      res.end(e.message);
+    }
+    return;
+  }
+
+  // /proxy?url= — proxy any m3u8
   if (path === "/proxy") {
     const targetUrl = query.url;
     if (!targetUrl) { res.writeHead(400, CORS_HEADERS); res.end("Missing url"); return; }
     try {
-      const { body, headers } = await fetchText(targetUrl);
+      const { body, headers } = await fetch(targetUrl);
       const proto = req.headers["x-forwarded-proto"] || "https";
-      const host = req.headers.host;
-      const proxyBase = `${proto}://${host}`;
+      const proxyBase = `${proto}://${req.headers.host}`;
       const rewritten = rewriteM3u8(body, targetUrl, proxyBase);
-      res.writeHead(200, {
-        ...CORS_HEADERS,
-        "Content-Type": headers["content-type"] || "application/vnd.apple.mpegurl",
-        "Cache-Control": "no-cache",
-      });
+      res.writeHead(200, { ...CORS_HEADERS, "Content-Type": headers["content-type"] || "application/vnd.apple.mpegurl", "Cache-Control": "no-cache" });
       res.end(rewritten);
     } catch (e) {
       res.writeHead(502, CORS_HEADERS);
@@ -147,39 +180,30 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // /segment?url=<encoded-url> — proxy a segment or nested m3u8
+  // /segment?url= — proxy segment or nested m3u8
   if (path === "/segment") {
     const targetUrl = query.url;
     if (!targetUrl) { res.writeHead(400, CORS_HEADERS); res.end("Missing url"); return; }
-
     if (targetUrl.includes(".m3u8") || targetUrl.includes("m3u8")) {
       try {
-        const { body, headers } = await fetchText(targetUrl);
+        const { body, headers } = await fetch(targetUrl);
         const proto = req.headers["x-forwarded-proto"] || "https";
-        const host = req.headers.host;
-        const proxyBase = `${proto}://${host}`;
+        const proxyBase = `${proto}://${req.headers.host}`;
         const rewritten = rewriteM3u8(body, targetUrl, proxyBase);
-        res.writeHead(200, {
-          ...CORS_HEADERS,
-          "Content-Type": headers["content-type"] || "application/vnd.apple.mpegurl",
-          "Cache-Control": "no-cache",
-        });
+        res.writeHead(200, { ...CORS_HEADERS, "Content-Type": headers["content-type"] || "application/vnd.apple.mpegurl", "Cache-Control": "no-cache" });
         res.end(rewritten);
       } catch (e) {
-        res.writeHead(502, CORS_HEADERS);
-        res.end("Failed: " + e.message);
+        res.writeHead(502, CORS_HEADERS); res.end("Failed: " + e.message);
       }
       return;
     }
-
-    proxyUrl(targetUrl, res);
+    proxyStream(targetUrl, res);
     return;
   }
 
   // /stream — ATV raw MPEG-TS
   if (path === "/stream") {
-    const atvUrl = `http://5.15.3.247:9988/stream/channel/234c63837f38efb4fbefc383a4b8c453`;
-    proxyUrl(atvUrl, res);
+    proxyStream(`http://5.15.3.247:9988/stream/channel/234c63837f38efb4fbefc383a4b8c453`, res);
     return;
   }
 
