@@ -138,7 +138,7 @@ const server = http.createServer(async (req, res) => {
 
   // /rtl — RTL raw MPEG-TS
   if (path === "/rtl") {
-    proxyStream("http://5.15.3.247:9988/playlist/channel/7a8871e3aab4acd9af44aba4e150610b", res);
+    proxyStream("http://5.15.3.247:9988/stream/channel/7a8871e3aab4acd9af44aba4e150610b?profile=webtv-h264-vorbis-mp4", res);
     return;
   }
 
