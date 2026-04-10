@@ -294,6 +294,47 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // /novas — NovaS HLS stream (geo-blocked outside EU; proxied via Render Frankfurt)
+  if (path === "/novas") {
+    const NOVAS_URL = "https://best-str.umn.cdn.united.cloud/stream?stream=hp7000&sp=novas&channel=novashd&u=novas&p=n0v43!23t001&player=m3u8";
+    try {
+      const { body, headers } = await fetch(NOVAS_URL, {
+        "Referer": "https://novas.rs/",
+        "Origin": "https://novas.rs",
+      });
+      const proto = req.headers["x-forwarded-proto"] || "https";
+      const proxyBase = `${proto}://${req.headers.host}`;
+      const rewritten = rewriteM3u8(body, NOVAS_URL, proxyBase);
+      res.writeHead(200, {
+        ...CORS_HEADERS,
+        "Content-Type": headers["content-type"] || "application/vnd.apple.mpegurl",
+        "Cache-Control": "no-cache",
+      });
+      res.end(rewritten);
+    } catch (e) {
+      console.error("NovaS error:", e.message);
+      res.writeHead(502, CORS_HEADERS);
+      res.end("NovaS error: " + e.message);
+    }
+    return;
+  }
+
+  // /novasdebug — return raw NovaS m3u8 for debugging
+  if (path === "/novasdebug") {
+    try {
+      const { body } = await fetch(
+        "https://best-str.umn.cdn.united.cloud/stream?stream=hp7000&sp=novas&channel=novashd&u=novas&p=n0v43!23t001&player=m3u8",
+        { "Referer": "https://novas.rs/" }
+      );
+      res.writeHead(200, { ...CORS_HEADERS, "Content-Type": "text/plain" });
+      res.end(body);
+    } catch (e) {
+      res.writeHead(502, CORS_HEADERS);
+      res.end(e.message);
+    }
+    return;
+  }
+
   // /stream — ATV raw MPEG-TS
   if (path === "/stream") {
     proxyStream(`http://5.15.3.247:9988/stream/channel/234c63837f38efb4fbefc383a4b8c453`, res);
