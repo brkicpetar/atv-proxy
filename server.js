@@ -1,6 +1,3 @@
-// ── Proxy Service 1: M1 + ATV ─────────────────────────────────────────────
-// Deploy this to your existing Render service (atv-proxy-1)
-
 const http = require("http");
 const https = require("https");
 const url = require("url");
@@ -139,9 +136,9 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // /stream — ATV raw MPEG-TS
-  if (path === "/stream") {
-    proxyStream("http://5.15.3.247:9988/stream/channel/234c63837f38efb4fbefc383a4b8c453", res);
+  // /rtl — RTL raw MPEG-TS
+  if (path === "/rtl") {
+    proxyStream("http://5.15.3.247:9988/stream/channel/7a8871e3aab4acd9af44aba4e150610b", res);
     return;
   }
 
@@ -184,4 +181,4 @@ const server = http.createServer(async (req, res) => {
 });
 
 const PORT = process.env.PORT || 10000;
-server.listen(PORT, () => console.log(`Proxy service 1 (M1 + ATV) on port ${PORT}`));
+server.listen(PORT, () => console.log(`Proxy service 1 (M1 + RTL) on port ${PORT}`));
