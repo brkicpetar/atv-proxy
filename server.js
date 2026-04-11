@@ -159,14 +159,14 @@ const server = http.createServer(async (req, res) => {
     const ff = spawn("ffmpeg", [
       "-loglevel", "error",
       "-i", RTL_SOURCE,
-      "-map", "0:v:0",        // first video stream only
-      "-map", "0:a:0",        // first audio stream only (skip second MP2 track)
-      "-c:v", "copy",         // H.264 passthrough — zero re-encode
-      "-c:a", "aac",          // MP2 → AAC
-      "-profile:a", "1",      // 1 = AAC-LC profile (numeric bypasses ffmpeg name parsing)
-      "-b:a", "192k",         // 192k prevents ffmpeg auto-selecting HE-AAC at low bitrates
-      "-ar", "48000",         // explicit sample rate
-      "-ac", "2",             // stereo
+      "-map", "0:v:0",                         // first video stream only
+      "-map", "0:a:0",                         // first audio stream only (skip second MP2 track)
+      "-c:v", "copy",                          // H.264 passthrough — zero re-encode
+      "-c:a", "libmp3lame -f mpegts",          // MP2 → MP3
+      "-profile:a", "1",                       // 1 = AAC-LC profile (numeric bypasses ffmpeg name parsing)
+      "-b:a", "192k",                          // 192k prevents ffmpeg auto-selecting HE-AAC at low bitrates
+      "-ar", "48000",                          // explicit sample rate
+      "-ac", "2",                              // stereo
       "-f", "mpegts",
       "pipe:1",
     ]);
