@@ -158,34 +158,37 @@ const server = http.createServer(async (req, res) => {
 
     // Inside path === "/rtl" block in server.js
     // Inside the path === "/rtl" block in server.js
-    const ff = spawn("ffmpeg", [
-      "-loglevel", "warning",
-      "-fflags", "nobuffer+genpts",
-      "-flags", "low_delay",
-      "-i", RTL_SOURCE,
+    // Inside path === "/rtl" in server.js
+const ff = spawn("ffmpeg", [
+  "-loglevel", "warning",
 
-      "-map", "0:v:0",
-      "-map", "0:a:0",
+  // 1. Input optimization
+  "-fflags", "nobuffer+genpts+flush_packets",
+  "-flags", "low_delay",
 
-      // VIDEO FIX: Use dump_extra to repeat SPS/PPS headers frequently
-      "-c:v", "copy",
-      "-bsf:v", "h264_mp4toannexb,dump_extra", 
+  "-i", RTL_SOURCE,
 
-      // AUDIO FIX: Force standard LC-AAC (mp4a.40.2) for better stability
-      "-c:a", "aac",
-      "-profile:a", "aac_low", 
-      "-b:a", "128k",
-      "-ar", "44100", 
-      "-ac", "2",
+  "-map", "0:v:0",
+  "-map", "0:a:0",
 
-      // MUXER FIX: Force resending headers in the TS stream
-      "-f", "mpegts",
-      "-mpegts_flags", "resend_headers",
-      "-muxdelay", "0",
-      "-muxpreload", "0",
+  // 2. VIDEO FIX: 'dump_extra' is the critical fix for "non-existing PPS 0"
+  "-c:v", "copy",
+  "-bsf:v", "h264_mp4toannexb,dump_extra", 
 
-      "pipe:1",
-    ]);
+  // 3. AUDIO: Consistent LC-AAC settings
+  "-c:a", "aac",
+  "-b:a", "128k",
+  "-ar", "44100",
+  "-ac", "2",
+
+  // 4. MUXER FIX: Use resend_headers without the period suffix to avoid errors
+  "-f", "mpegts",
+  "-mpegts_flags", "resend_headers",
+  "-muxdelay", "0",
+  "-muxpreload", "0",
+
+  "pipe:1",
+]);
 
     ff.stdout.pipe(res);
     ff.stderr.on("data", (d) => console.error("[RTL]", d.toString().trim()));
