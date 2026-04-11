@@ -157,37 +157,34 @@ const server = http.createServer(async (req, res) => {
     });
 
     // Inside path === "/rtl" block in server.js
+    // Inside the path === "/rtl" block in server.js
     const ff = spawn("ffmpeg", [
-    "-loglevel", "warning",
+      "-loglevel", "warning",
+      "-fflags", "nobuffer+genpts",
+      "-flags", "low_delay",
+      "-i", RTL_SOURCE,
 
-    // 1. Input flags to minimize lag
-    "-fflags", "nobuffer+genpts",
-    "-flags", "low_delay",
+      "-map", "0:v:0",
+      "-map", "0:a:0",
 
-    "-i", RTL_SOURCE,
+      // VIDEO FIX: Use dump_extra to repeat SPS/PPS headers frequently
+      "-c:v", "copy",
+      "-bsf:v", "h264_mp4toannexb,dump_extra", 
 
-    "-map", "0:v:0",
-    "-map", "0:a:0",
+      // AUDIO FIX: Force standard LC-AAC (mp4a.40.2) for better stability
+      "-c:a", "aac",
+      "-profile:a", "aac_low", 
+      "-b:a", "128k",
+      "-ar", "44100", 
+      "-ac", "2",
 
-    // 2. VIDEO: Inject SPS/PPS into the bitstream
-    // We combine the annexb filter with dump_extra to force headers on keyframes
-    "-c:v", "copy",
-    "-bsf:v", "h264_mp4toannexb,dump_extra",
+      // MUXER FIX: Force resending headers in the TS stream
+      "-f", "mpegts",
+      "-mpegts_flags", "resend_headers",
+      "-muxdelay", "0",
+      "-muxpreload", "0",
 
-    // 3. AUDIO: Transcode MP2 to AAC (matching config requirements)
-    "-c:a", "aac",
-    "-b:a", "192k",
-    "-ar", "48000",
-    "-ac", "2",
-    "-af", "aresample=async=1",
-
-    // 4. MUXER: Using the more universal flag for header repetition
-    "-f", "mpegts",
-    "-mpegts_flags", "resend_headers", 
-    "-muxdelay", "0",
-    "-muxpreload", "0",
-
-    "pipe:1",
+      "pipe:1",
     ]);
 
     ff.stdout.pipe(res);
