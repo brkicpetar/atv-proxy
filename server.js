@@ -172,7 +172,7 @@ const server = http.createServer(async (req, res) => {
 
   "-c:v", "copy",
   
-  "-c:a", "aac",
+  "-c:a", "libfdk_aac",
   "-profile:a", "aac_low",
   "-b:a", "192k",
   "-ar", "48000",
