@@ -173,10 +173,11 @@ const ff = spawn("ffmpeg", [
 
   // 2. VIDEO FIX: 'dump_extra' is the critical fix for "non-existing PPS 0"
   "-c:v", "copy",
-  "-bsf:v", "h264_mp4toannexb,dump_extra", 
+  "-bsf:v", "dump_extra",    // reinject SPS/PPS on every keyframe — fixes "non-existing PPS 0" 
 
   // 3. AUDIO: Consistent LC-AAC settings
   "-c:a", "aac",
+  "-profile:a", "aac_low",    // force AAC-LC, not HE-AAC (mp4a.40.5 breaks MSE in some browsers)
   "-b:a", "128k",
   "-ar", "44100",
   "-ac", "2",
