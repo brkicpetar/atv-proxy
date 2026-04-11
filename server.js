@@ -157,33 +157,37 @@ const server = http.createServer(async (req, res) => {
     });
 
     const ff = spawn("ffmpeg", [
-    "-loglevel", "warning",
+  "-loglevel", "warning",
 
-    "-fflags", "nobuffer+genpts",
-    "-flags", "low_delay",
+  // 1. Improved input flags for live streams
+  "-fflags", "nobuffer+genpts+flush_packets", 
+  "-flags", "low_delay",
 
-    "-i", RTL_SOURCE,
+  "-i", RTL_SOURCE,
 
-    "-map", "0:v:0",
-    "-map", "0:a:0",
+  "-map", "0:v:0",
+  "-map", "0:a:0",
 
-    // 🔥 FIX VIDEO STREAM
-    "-c:v", "copy",
-    "-bsf:v", "h264_mp4toannexb",
+  // 2. VIDEO FIX: Ensure SPS/PPS are injected
+  // 'dump_extra' forces headers into the stream for every keyframe
+  "-c:v", "copy",
+  "-bsf:v", "h264_mp4toannexb,dump_extra",
 
-    // 🔥 FIX AUDIO (already correct)
-    "-c:a", "aac",
-    "-b:a", "192k",
-    "-ar", "48000",
-    "-ac", "2",
-    "-af", "aresample=async=1",
+  // 3. AUDIO: Standard AAC-LC (keep as is or slightly simplified)
+  "-c:a", "aac",
+  "-b:a", "128k", 
+  "-ar", "48000",
+  "-ac", "2",
 
-    "-f", "mpegts",
-    "-muxdelay", "0",
-    "-muxpreload", "0",
+  // 4. MUXER FIX: Force header repetition
+  "-f", "mpegts",
+  "-mpegts_headers_period", "1", // Resend headers every second
+  "-mpegts_flags", "resend_headers",
+  "-muxdelay", "0",
+  "-muxpreload", "0",
 
-    "pipe:1",
-  ]);
+  "pipe:1",
+]);
 
     ff.stdout.pipe(res);
     ff.stderr.on("data", (d) => console.error("[RTL]", d.toString().trim()));
