@@ -136,9 +136,13 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // /rtl — RTL raw MPEG-TS
+  const RTL_SOURCE =
+  "http://5.15.3.247:9988/stream/channel/2b5c7013a78488b6f2339075d66e0414?profile=webtv-vp8-vorbis-webm";
+
   if (path === "/rtl") {
-    proxyStream("http://5.15.3.247:9988/stream/channel/7a8871e3aab4acd9af44aba4e150610b?profile=webtv-h264-aac-mpegts", res);
+    proxyStream(RTL_SOURCE, res, {
+      "Content-Type": "video/webm",
+    });
     return;
   }
 
