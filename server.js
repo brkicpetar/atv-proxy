@@ -157,21 +157,33 @@ const server = http.createServer(async (req, res) => {
     });
 
     const ff = spawn("ffmpeg", [
-      "-loglevel", "warning",
-      "-reconnect", "1",
-      "-reconnect_streamed", "1",
-      "-reconnect_delay_max", "5",
-      "-i", RTL_SOURCE,
-      "-map", "0:v:0",        // first video stream only
-      "-map", "0:a:0",        // first audio stream only (skip second track)
-      "-c:v", "copy",         // H.264 passthrough — zero re-encode
-      "-c:a", "libmp3lame",   // MP2/ADTS → MP3 (libmp3lame, always GPL-available on Render)
-      "-b:a", "192k",
-      "-ar", "48000",
-      "-ac", "2",
-      "-f", "mpegts",
-      "pipe:1",
-    ]);
+  "-loglevel", "warning",
+  "-fflags", "nobuffer",
+  "-flags", "low_delay",
+
+  "-reconnect", "1",
+  "-reconnect_streamed", "1",
+  "-reconnect_delay_max", "5",
+
+  "-i", RTL_SOURCE,
+
+  "-map", "0:v:0",
+  "-map", "0:a:0",
+
+  "-c:v", "copy",
+  
+  "-c:a", "aac",
+  "-profile:a", "aac_low",
+  "-b:a", "128k",
+  "-ar", "48000",
+  "-ac", "2",
+
+  "-f", "mpegts",
+  "-muxdelay", "0",
+  "-muxpreload", "0",
+
+  "pipe:1",
+]);
 
     ff.stdout.pipe(res);
     ff.stderr.on("data", (d) => console.error("[RTL]", d.toString().trim()));
