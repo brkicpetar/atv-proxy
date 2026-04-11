@@ -174,9 +174,10 @@ const server = http.createServer(async (req, res) => {
   
   "-c:a", "aac",
   "-profile:a", "aac_low",
-  "-b:a", "128k",
+  "-b:a", "192k",
   "-ar", "48000",
   "-ac", "2",
+  "-cutoff", "18000",
 
   "-f", "mpegts",
   "-muxdelay", "0",
