@@ -1,6 +1,7 @@
 const http = require("http");
 const https = require("https");
 const url = require("url");
+const { spawn } = require("child_process");
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -99,6 +100,12 @@ async function getM1Stream() {
   throw new Error("Could not extract M1 stream URL. Body preview: " + body.slice(0, 500));
 }
 
+// RTL Hungary — H.264 video + MP2 audio (native passthrough from TVheadend)
+// ffmpeg transcodes audio only: MP2 → AAC-LC. Video is bit-exact H.264 copy.
+// CPU cost is minimal — audio-only transcode on a single stereo stream.
+const RTL_SOURCE =
+  "http://5.15.3.247:9988/stream/channel/2b5c7013a78488b6f2339075d66e0414?profile=pass";
+
 const server = http.createServer(async (req, res) => {
   if (req.method === "OPTIONS") { res.writeHead(204, CORS_HEADERS); res.end(); return; }
 
@@ -108,7 +115,7 @@ const server = http.createServer(async (req, res) => {
 
   if (path === "/health") { res.writeHead(200, CORS_HEADERS); res.end("ok"); return; }
 
-  // /m1
+  // /m1 — resolve M1 stream and proxy rewritten m3u8
   if (path === "/m1") {
     try {
       const m3u8Url = await getM1Stream();
@@ -116,7 +123,11 @@ const server = http.createServer(async (req, res) => {
       const proto = req.headers["x-forwarded-proto"] || "https";
       const proxyBase = `${proto}://${req.headers.host}`;
       const rewritten = rewriteM3u8(body, m3u8Url, proxyBase);
-      res.writeHead(200, { ...CORS_HEADERS, "Content-Type": m3u8Headers["content-type"] || "application/vnd.apple.mpegurl", "Cache-Control": "no-cache" });
+      res.writeHead(200, {
+        ...CORS_HEADERS,
+        "Content-Type": m3u8Headers["content-type"] || "application/vnd.apple.mpegurl",
+        "Cache-Control": "no-cache",
+      });
       res.end(rewritten);
     } catch (e) {
       console.error("M1 error:", e.message);
@@ -126,7 +137,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // /m1debug
+  // /m1debug — raw mediaklikk player page for debugging
   if (path === "/m1debug") {
     try {
       const { body } = await fetch("https://player.mediaklikk.hu/playernew/player.php?video=mtv1live&noflash=yes&autostart=true");
@@ -136,17 +147,52 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  const RTL_SOURCE =
-  "http://5.15.3.247:9988/stream/channel/2b5c7013a78488b6f2339075d66e0414?profile=webtv-vp8-vorbis-webm";
-
+  // /rtl — H.264 passthrough + MP2→AAC-LC audio transcode via ffmpeg
   if (path === "/rtl") {
-    proxyStream(RTL_SOURCE, res, {
-      "Content-Type": "video/webm",
+    res.writeHead(200, {
+      ...CORS_HEADERS,
+      "Content-Type": "video/mp2t",
+      "Cache-Control": "no-cache",
+      "Transfer-Encoding": "chunked",
     });
+
+    const ff = spawn("ffmpeg", [
+      "-loglevel", "error",
+      "-i", RTL_SOURCE,
+      "-map", "0:v:0",        // first video stream only
+      "-map", "0:a:0",        // first audio stream only (skip second MP2 track)
+      "-c:v", "copy",         // H.264 passthrough — zero re-encode
+      "-c:a", "aac",          // MP2 → AAC-LC
+      "-profile:a", "aac_low",
+      "-b:a", "128k",
+      "-ac", "2",             // stereo
+      "-f", "mpegts",
+      "pipe:1",
+    ]);
+
+    ff.stdout.pipe(res);
+    ff.stderr.on("data", (d) => console.error("[RTL]", d.toString().trim()));
+    ff.on("close", (code) => {
+      console.log(`[RTL] ffmpeg exited ${code}`);
+      if (!res.writableEnded) res.end();
+    });
+    req.on("close", () => ff.kill("SIGKILL"));
     return;
   }
 
-  // /proxy?url=
+  // /rtldebug — raw passthrough from TVheadend for debugging
+  if (path === "/rtldebug") {
+    proxyStream(RTL_SOURCE, res);
+    return;
+  }
+
+  // /stream — ATV raw MPEG-TS
+  if (path === "/stream") {
+    proxyStream("http://5.15.3.247:9988/stream/channel/234c63837f38efb4fbefc383a4b8c453", res);
+    return;
+  }
+
+  // /proxy?url= — generic m3u8 proxy
   if (path === "/proxy") {
     const targetUrl = query.url;
     if (!targetUrl) { res.writeHead(400, CORS_HEADERS); res.end("Missing url"); return; }
@@ -155,13 +201,17 @@ const server = http.createServer(async (req, res) => {
       const proto = req.headers["x-forwarded-proto"] || "https";
       const proxyBase = `${proto}://${req.headers.host}`;
       const rewritten = rewriteM3u8(body, targetUrl, proxyBase);
-      res.writeHead(200, { ...CORS_HEADERS, "Content-Type": headers["content-type"] || "application/vnd.apple.mpegurl", "Cache-Control": "no-cache" });
+      res.writeHead(200, {
+        ...CORS_HEADERS,
+        "Content-Type": headers["content-type"] || "application/vnd.apple.mpegurl",
+        "Cache-Control": "no-cache",
+      });
       res.end(rewritten);
     } catch (e) { res.writeHead(502, CORS_HEADERS); res.end("Failed: " + e.message); }
     return;
   }
 
-  // /segment?url=
+  // /segment?url= — proxy individual segments or nested m3u8
   if (path === "/segment") {
     const targetUrl = query.url;
     if (!targetUrl) { res.writeHead(400, CORS_HEADERS); res.end("Missing url"); return; }
@@ -171,7 +221,11 @@ const server = http.createServer(async (req, res) => {
         const proto = req.headers["x-forwarded-proto"] || "https";
         const proxyBase = `${proto}://${req.headers.host}`;
         const rewritten = rewriteM3u8(body, targetUrl, proxyBase);
-        res.writeHead(200, { ...CORS_HEADERS, "Content-Type": headers["content-type"] || "application/vnd.apple.mpegurl", "Cache-Control": "no-cache" });
+        res.writeHead(200, {
+          ...CORS_HEADERS,
+          "Content-Type": headers["content-type"] || "application/vnd.apple.mpegurl",
+          "Cache-Control": "no-cache",
+        });
         res.end(rewritten);
       } catch (e) { res.writeHead(502, CORS_HEADERS); res.end("Failed: " + e.message); }
       return;
@@ -185,4 +239,4 @@ const server = http.createServer(async (req, res) => {
 });
 
 const PORT = process.env.PORT || 10000;
-server.listen(PORT, () => console.log(`Proxy service 1 (M1 + RTL) on port ${PORT}`));
+server.listen(PORT, () => console.log(`Proxy service 1 (M1 + ATV + RTL) on port ${PORT}`));
