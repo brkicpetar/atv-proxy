@@ -157,33 +157,33 @@ const server = http.createServer(async (req, res) => {
     });
 
     const ff = spawn("ffmpeg", [
-  "-loglevel", "warning",
-  "-fflags", "nobuffer",
-  "-flags", "low_delay",
+    "-loglevel", "warning",
 
-  "-reconnect", "1",
-  "-reconnect_streamed", "1",
-  "-reconnect_delay_max", "5",
+    "-fflags", "nobuffer+genpts",
+    "-flags", "low_delay",
 
-  "-i", RTL_SOURCE,
+    "-i", RTL_SOURCE,
 
-  "-map", "0:v:0",
-  "-map", "0:a:0",
+    "-map", "0:v:0",
+    "-map", "0:a:0",
 
-  "-c:v", "copy",
-  
-  "-c:a", "aac",
-  "-b:a", "192k",
-  "-ar", "48000",
-  "-ac", "2",
-  "-af", "aresample=async=1",
+    // 🔥 FIX VIDEO STREAM
+    "-c:v", "copy",
+    "-bsf:v", "h264_mp4toannexb",
 
-  "-f", "mpegts",
-  "-muxdelay", "0",
-  "-muxpreload", "0",
+    // 🔥 FIX AUDIO (already correct)
+    "-c:a", "aac",
+    "-b:a", "192k",
+    "-ar", "48000",
+    "-ac", "2",
+    "-af", "aresample=async=1",
 
-  "pipe:1",
-]);
+    "-f", "mpegts",
+    "-muxdelay", "0",
+    "-muxpreload", "0",
+
+    "pipe:1",
+  ]);
 
     ff.stdout.pipe(res);
     ff.stderr.on("data", (d) => console.error("[RTL]", d.toString().trim()));
