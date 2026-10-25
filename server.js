@@ -1,263 +1,187 @@
-const http = require("http");
-const https = require("https");
-const url = require("url");
-const { spawn } = require("child_process");
 
-const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, OPTIONS, HEAD",
-  "Access-Control-Allow-Headers": "*",
-};
+const express = require("express");
+const { Readable } = require("node:stream");
 
-function fetch(targetUrl, extraHeaders = {}) {
-  return new Promise((resolve, reject) => {
-    const client = targetUrl.startsWith("https") ? https : http;
-    const opts = {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120",
-        "Referer": "https://mediaklikk.hu/",
-        "Origin": "https://mediaklikk.hu",
-        ...extraHeaders,
-      }
-    };
-    client.get(targetUrl, opts, (res) => {
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        return fetch(res.headers.location, extraHeaders).then(resolve).catch(reject);
-      }
-      let data = Buffer.alloc(0);
-      res.on("data", (chunk) => data = Buffer.concat([data, chunk]));
-      res.on("end", () => resolve({ body: data.toString(), headers: res.headers, status: res.statusCode }));
-    }).on("error", reject);
-  });
-}
+const app = express();
 
-function proxyStream(targetUrl, res, extraHeaders = {}) {
-  const client = targetUrl.startsWith("https") ? https : http;
-  client.get(targetUrl, {
-    headers: {
-      "User-Agent": "Mozilla/5.0",
-      "Referer": "https://mediaklikk.hu/",
-      ...extraHeaders,
-    }
-  }, (proxyRes) => {
-    const headers = {};
-    for (const [k, v] of Object.entries(proxyRes.headers)) {
-      if (!k.toLowerCase().startsWith("access-control")) headers[k] = v;
-    }
-    Object.assign(headers, CORS_HEADERS);
-    res.writeHead(proxyRes.statusCode, headers);
-    proxyRes.pipe(res);
-  }).on("error", (e) => {
-    res.writeHead(502, CORS_HEADERS);
-    res.end("Proxy error: " + e.message);
-  });
-}
+const UPSTREAM =
+  "http://212.200.230.50:1935";
 
-function rewriteM3u8(content, baseUrl, proxyBase) {
-  const base = new URL(baseUrl);
-  const makeAbsolute = (u) => {
-    try { return new URL(u).href; }
-    catch { return new URL(u, base).href; }
-  };
-  return content.split("\n").map((line) => {
-    const trimmed = line.trim();
-    if (!trimmed) return line;
-    if (trimmed.startsWith("#")) {
-      return line.replace(/URI="([^"]+)"/g, (_, uri) =>
-        `URI="${proxyBase}/segment?url=${encodeURIComponent(makeAbsolute(uri))}"`
-      );
-    }
-    return `${proxyBase}/segment?url=${encodeURIComponent(makeAbsolute(trimmed))}`;
-  }).join("\n");
-}
+const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN;
 
-async function getM1Stream() {
-  const tokenUrl = "https://player.mediaklikk.hu/playernew/player.php?video=mtv1live&noflash=yes&autostart=true";
-  const { body } = await fetch(tokenUrl);
-  const patterns = [
-    /"file"\s*:\s*"(https?:\\\/\\\/[^"]+\.m3u8[^"]*)"/i,
-    /"file"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/i,
-    /"file"\s*:\s*"(https?:[^"]+\.m3u8[^"]*)"/i,
-    /(https?:\\\/\\\/[^\s"']+\.m3u8[^\s"']*)/i,
-    /(https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*)/i,
-  ];
-  for (const pattern of patterns) {
-    const match = body.match(pattern);
-    if (match) {
-      const u = (match[1] || match[0]).replace(/\\\//g, "/");
-      console.log("Extracted M1 URL:", u);
-      return u;
-    }
-  }
-  const tokenApiUrl = "https://player.mediaklikk.hu/player/api/token?channel=m1";
-  const tokenResp = await fetch(tokenApiUrl);
-  try {
-    const json = JSON.parse(tokenResp.body);
-    if (json.url) return json.url;
-    if (json.stream) return json.stream;
-    if (json.file) return json.file;
-  } catch {}
-  throw new Error("Could not extract M1 stream URL. Body preview: " + body.slice(0, 500));
-}
+app.use((req, res, next) => {
+  const origin = req.get("origin");
 
-// RTL Hungary — H.264 video + MP2 audio (native passthrough from TVheadend)
-// ffmpeg transcodes audio only: MP2 → AAC-LC. Video is bit-exact H.264 copy.
-// CPU cost is minimal — audio-only transcode on a single stereo stream.
-const RTL_SOURCE =
-  "http://5.15.3.247:9988/stream/channel/2b5c7013a78488b6f2339075d66e0414?profile=pass";
-
-const server = http.createServer(async (req, res) => {
-  if (req.method === "OPTIONS") { res.writeHead(204, CORS_HEADERS); res.end(); return; }
-
-  const parsed = url.parse(req.url, true);
-  const path = parsed.pathname;
-  const query = parsed.query;
-
-  if (path === "/health") { res.writeHead(200, CORS_HEADERS); res.end("ok"); return; }
-
-  // /m1 — resolve M1 stream and proxy rewritten m3u8
-  if (path === "/m1") {
-    try {
-      const m3u8Url = await getM1Stream();
-      const { body, headers: m3u8Headers } = await fetch(m3u8Url);
-      const proto = req.headers["x-forwarded-proto"] || "https";
-      const proxyBase = `${proto}://${req.headers.host}`;
-      const rewritten = rewriteM3u8(body, m3u8Url, proxyBase);
-      res.writeHead(200, {
-        ...CORS_HEADERS,
-        "Content-Type": m3u8Headers["content-type"] || "application/vnd.apple.mpegurl",
-        "Cache-Control": "no-cache",
-      });
-      res.end(rewritten);
-    } catch (e) {
-      console.error("M1 error:", e.message);
-      res.writeHead(502, CORS_HEADERS);
-      res.end("M1 error: " + e.message);
-    }
-    return;
+  if (origin && origin !== ALLOWED_ORIGIN) {
+    return res.status(403).send("Origin not allowed");
   }
 
-  // /m1debug — raw mediaklikk player page for debugging
-  if (path === "/m1debug") {
-    try {
-      const { body } = await fetch("https://player.mediaklikk.hu/playernew/player.php?video=mtv1live&noflash=yes&autostart=true");
-      res.writeHead(200, { ...CORS_HEADERS, "Content-Type": "text/plain" });
-      res.end(body);
-    } catch (e) { res.writeHead(502, CORS_HEADERS); res.end(e.message); }
-    return;
+  res.setHeader(
+    "Access-Control-Allow-Origin",
+    ALLOWED_ORIGIN
+  );
+  res.setHeader("Vary", "Origin");
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET, HEAD, OPTIONS"
+  );
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Range"
+  );
+  res.setHeader(
+    "Access-Control-Expose-Headers",
+    "Content-Length, Content-Range, Accept-Ranges"
+  );
+
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(204);
   }
 
-  // /rtl — H.264 passthrough + MP2→AAC-LC audio transcode via ffmpeg
-  if (path === "/rtl") {
-    res.writeHead(200, {
-      ...CORS_HEADERS,
-      "Content-Type": "video/mp2t",
-      "Cache-Control": "no-cache",
-      "Transfer-Encoding": "chunked",
-    });
-
-    // Inside path === "/rtl" block in server.js
-    // Inside the path === "/rtl" block in server.js
-    // Inside path === "/rtl" in server.js
-const ff = spawn("ffmpeg", [
-  "-loglevel", "warning",
-
-  // 1. Input optimization
-  "-fflags", "nobuffer+genpts+flush_packets",
-  "-flags", "low_delay",
-
-  "-i", RTL_SOURCE,
-
-  "-map", "0:v:0",
-  "-map", "0:a:0",
-
-  // 2. VIDEO FIX: 'dump_extra' is the critical fix for "non-existing PPS 0"
-  "-c:v", "copy",
-  "-bsf:v", "dump_extra",    // reinject SPS/PPS on every keyframe — fixes "non-existing PPS 0" 
-
-  // 3. AUDIO: Consistent LC-AAC settings
-  "-c:a", "aac",
-  "-profile:a", "aac_low",    // force AAC-LC, not HE-AAC (mp4a.40.5 breaks MSE in some browsers)
-  "-b:a", "128k",
-  "-ar", "44100",
-  "-ac", "2",
-
-  // 4. MUXER FIX: Use resend_headers without the period suffix to avoid errors
-  "-f", "mpegts",
-  "-mpegts_flags", "resend_headers",
-  "-muxdelay", "0",
-  "-muxpreload", "0",
-
-  "pipe:1",
-]);
-
-    ff.stdout.pipe(res);
-    ff.stderr.on("data", (d) => console.error("[RTL]", d.toString().trim()));
-    ff.on("close", (code) => {
-      console.log(`[RTL] ffmpeg exited ${code}`);
-      if (!res.writableEnded) res.end();
-    });
-    req.on("close", () => ff.kill("SIGKILL"));
-    return;
-  }
-
-  // /rtldebug — raw passthrough from TVheadend for debugging
-  if (path === "/rtldebug") {
-    proxyStream(RTL_SOURCE, res);
-    return;
-  }
-
-  // /stream — ATV raw MPEG-TS
-  if (path === "/stream") {
-    proxyStream("http://5.15.3.247:9988/stream/channel/234c63837f38efb4fbefc383a4b8c453", res);
-    return;
-  }
-
-  // /proxy?url= — generic m3u8 proxy
-  if (path === "/proxy") {
-    const targetUrl = query.url;
-    if (!targetUrl) { res.writeHead(400, CORS_HEADERS); res.end("Missing url"); return; }
-    try {
-      const { body, headers } = await fetch(targetUrl);
-      const proto = req.headers["x-forwarded-proto"] || "https";
-      const proxyBase = `${proto}://${req.headers.host}`;
-      const rewritten = rewriteM3u8(body, targetUrl, proxyBase);
-      res.writeHead(200, {
-        ...CORS_HEADERS,
-        "Content-Type": headers["content-type"] || "application/vnd.apple.mpegurl",
-        "Cache-Control": "no-cache",
-      });
-      res.end(rewritten);
-    } catch (e) { res.writeHead(502, CORS_HEADERS); res.end("Failed: " + e.message); }
-    return;
-  }
-
-  // /segment?url= — proxy individual segments or nested m3u8
-  if (path === "/segment") {
-    const targetUrl = query.url;
-    if (!targetUrl) { res.writeHead(400, CORS_HEADERS); res.end("Missing url"); return; }
-    if (targetUrl.includes(".m3u8") || targetUrl.includes("m3u8")) {
-      try {
-        const { body, headers } = await fetch(targetUrl);
-        const proto = req.headers["x-forwarded-proto"] || "https";
-        const proxyBase = `${proto}://${req.headers.host}`;
-        const rewritten = rewriteM3u8(body, targetUrl, proxyBase);
-        res.writeHead(200, {
-          ...CORS_HEADERS,
-          "Content-Type": headers["content-type"] || "application/vnd.apple.mpegurl",
-          "Cache-Control": "no-cache",
-        });
-        res.end(rewritten);
-      } catch (e) { res.writeHead(502, CORS_HEADERS); res.end("Failed: " + e.message); }
-      return;
-    }
-    proxyStream(targetUrl, res);
-    return;
-  }
-
-  res.writeHead(404, CORS_HEADERS);
-  res.end("Not found");
+  next();
 });
 
-const PORT = process.env.PORT || 10000;
-server.listen(PORT, () => console.log(`Proxy service 1 (M1 + ATV + RTL) on port ${PORT}`));
+app.use("/hls", async (req, res) => {
+  try {
+    const path = req.path;
+
+    // Only allow paths belonging to the RTV stream.
+    if (
+      !path.startsWith("/RTV/") ||
+      path.includes("..") ||
+      path.includes("\\")
+    ) {
+      return res.sendStatus(403);
+    }
+
+    const upstreamUrl = new URL(
+      UPSTREAM + path + req.url.substring(
+        req.path.length
+      )
+    );
+
+    const upstream = await fetch(upstreamUrl, {
+      headers: {
+        ...(req.headers.range
+          ? { Range: req.headers.range }
+          : {})
+      },
+      signal: AbortSignal.timeout(15000)
+    });
+
+    if (!upstream.ok || !upstream.body) {
+      return res.status(upstream.status).send(
+        "Upstream stream request failed"
+      );
+    }
+
+    const contentType =
+      upstream.headers.get("content-type") || "";
+
+    const isPlaylist =
+      path.toLowerCase().endsWith(".m3u8") ||
+      contentType.includes("mpegurl");
+
+    res.status(upstream.status);
+    res.setHeader(
+      "Cache-Control",
+      "no-store"
+    );
+
+    if (isPlaylist) {
+      let playlist = await upstream.text();
+
+      // Rewrite playlist URLs so segments and
+      // nested playlists also go through HTTPS.
+      const rewrite = (value, base) => {
+        const url = new URL(value, base);
+
+        if (
+          url.hostname !== "212.200.230.50" ||
+          url.port !== "1935" ||
+          !url.pathname.startsWith("/RTV/")
+        ) {
+          throw new Error(
+            "Playlist references an unexpected host"
+          );
+        }
+
+        return "/hls" +
+          url.pathname +
+          url.search;
+      };
+
+      const base = upstreamUrl;
+
+      playlist = playlist
+        .split(/\r?\n/)
+        .map(line => {
+          const trimmed = line.trim();
+
+          if (!trimmed) return line;
+
+          if (trimmed.startsWith("#")) {
+            return line.replace(
+              /URI="([^"]+)"/g,
+              (_, uri) =>
+                `URI="${rewrite(uri, base)}"`
+            );
+          }
+
+          return rewrite(trimmed, base);
+        })
+        .join("\n");
+
+      res.setHeader(
+        "Content-Type",
+        "application/vnd.apple.mpegurl"
+      );
+
+      return res.send(playlist);
+    }
+
+    const headersToForward = [
+      "content-type",
+      "content-length",
+      "content-range",
+      "accept-ranges"
+    ];
+
+    for (const header of headersToForward) {
+      const value = upstream.headers.get(header);
+      if (value) res.setHeader(header, value);
+    }
+
+    res.setHeader(
+      "Content-Type",
+      contentType || "application/octet-stream"
+    );
+
+    if (req.method === "HEAD") {
+      await upstream.body.cancel();
+      return res.end();
+    }
+
+    Readable.fromWeb(upstream.body).pipe(res);
+  } catch (error) {
+    console.error("Proxy error:", error.message);
+
+    if (!res.headersSent) {
+      res.status(502).send(
+        "Unable to retrieve upstream stream"
+      );
+    } else {
+      res.destroy(error);
+    }
+  }
+});
+
+app.get("/", (_req, res) => {
+  res.send("RTV HLS proxy is running");
+});
+
+const port = process.env.PORT || 3000;
+
+app.listen(port, () => {
+  console.log(`Proxy listening on ${port}`);
+});
